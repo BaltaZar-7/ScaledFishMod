@@ -1,13 +1,13 @@
 ﻿#nullable disable
 using HarmonyLib;
 using Il2Cpp;
-using Il2CppNodeCanvas.Tasks.Actions;
 using Il2CppTLD.IntBackedUnit;
 using MelonLoader;
 using MelonLoader.Utils;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 
 namespace ScaledFishMod
@@ -37,11 +37,12 @@ namespace ScaledFishMod
     {
         static void Postfix(GearItem __instance)
         {
-            if (__instance == null)
+            if (__instance == null || __instance.m_InPlayerInventory)
                 return;
 
+
             MelonCoroutines.Start(
-                FishScaler.ScaleAfterSpawn(__instance, "[Awake]")
+                FishScaler.ScaleAfterSceneLoad(__instance)
             );
         }
     }
@@ -55,8 +56,24 @@ namespace ScaledFishMod
                 return;
 
             MelonCoroutines.Start(
-                FishScaler.ScaleAfterSpawn(__instance, "[Drop]")
+                FishScaler.ScaleAfterDropDelayed(__instance)
             );
+        }
+    }
+
+    [HarmonyPatch(typeof(IceFishingHole), "InstantiateFish")]
+    internal static class IceFishingHole_InstantiateFish_Patch
+    {
+        static void Postfix(GearItem __result)
+        {
+            if (__result == null || !__result)
+                return;
+
+            Transform tr = __result.transform;
+            if (tr == null)
+                return;
+
+            FishScaler.MarkAsRecentlyCaught(tr.Pointer);
         }
     }
 
@@ -64,12 +81,61 @@ namespace ScaledFishMod
 
     internal static class FishScaler
     {
-        // vanilla base scale cache
-        private static readonly Dictionary<IntPtr, Vector3> _baseScales = new();
+        private static readonly HashSet<IntPtr> _freshCatchScaledOnce = new HashSet<IntPtr>();
+        private static readonly HashSet<IntPtr> _recentlyCaught = new HashSet<IntPtr>();
 
-        public static IEnumerator ScaleAfterSpawn(GearItem gi, string sourceTag)
+        private static readonly Dictionary<string, Vector3> _baseScales =
+            new Dictionary<string, Vector3>()
         {
-            // exit / save / invalid safety
+            { "whitefish", new Vector3(0.35f, 0.35f, 0.35f) },
+            { "burbot", new Vector3(1.00f, 1.00f, 1.00f) },
+            { "rainbowtrout", new Vector3(0.35f, 0.35f, 0.35f) },
+            { "cohosalmon", new Vector3(0.35f, 0.35f, 0.35f) },
+            { "goldeye", new Vector3(1.00f, 1.00f, 1.00f) },
+            { "redirishlord", new Vector3(1.00f, 1.00f, 1.00f) },
+            { "rockfish", new Vector3(1.00f, 1.00f, 1.00f) },
+            { "smallmouthbass", new Vector3(0.60f, 0.60f, 0.60f) }
+        };
+
+        public static void MarkAsRecentlyCaught(IntPtr key)
+        {
+            _recentlyCaught.Add(key);
+        }
+
+        // ---------------- SCALING COROUTINES ----------------
+
+        public static IEnumerator ScaleAfterSceneLoad(GearItem gi)
+        {
+            yield return null;
+            yield return null;
+            yield return null;
+
+            yield return ScaleNow(gi, "[SceneLoad]");
+        }
+
+        public static IEnumerator ScaleAfterDropDelayed(GearItem gi)
+        {
+            if (gi == null || !gi || gi.gameObject == null)
+                yield break;
+
+            Transform tr = gi.transform;
+            if (tr == null)
+                yield break;
+
+            int safetyCounter = 0;
+            while (gi.m_InPlayerInventory)
+            {
+                yield return null;
+                safetyCounter++;
+                if (safetyCounter > 30)
+                    yield break;
+            }
+
+            yield return ScaleNow(gi, "[DropDelayed]");
+        }
+
+        public static IEnumerator ScaleNow(GearItem gi, string sourceTag)
+        {
             if (gi == null || !gi || gi.gameObject == null)
                 yield break;
 
@@ -80,13 +146,18 @@ namespace ScaledFishMod
             if (tr == null)
                 yield break;
 
+            IntPtr key = tr.Pointer;
+
+            if (_recentlyCaught.Contains(key))
+            {
+                if (_freshCatchScaledOnce.Contains(key))
+                    yield break;
+
+                _freshCatchScaledOnce.Add(key);
+            }
+
             GameObject go = gi.gameObject;
-            if (go == null || !IsFish(go.name))
-                yield break;
-
-            yield return null;
-
-            if (gi == null || !gi || tr == null)
+            if (!IsFish(go.name))
                 yield break;
 
             float kg;
@@ -102,33 +173,51 @@ namespace ScaledFishMod
             if (kg <= 0.01f)
                 yield break;
 
-            IntPtr key = tr.Pointer;
+            string lname = go.name.ToLowerInvariant();
+            Vector3 baseScale = default;
 
-            if (!_baseScales.TryGetValue(key, out Vector3 baseScale))
+            foreach (var kvp in _baseScales)
             {
-                baseScale = tr.localScale;
-                _baseScales[key] = baseScale;
+                if (lname.Contains(kvp.Key))
+                {
+                    baseScale = kvp.Value;
+                    break;
+                }
             }
 
-            float scaleFactor = CalculateScaleFactor(
-                kg,
-                go.name,
-                go.GetComponent<FoodWeight>()
-            );
+            if (baseScale == default)
+                yield break;
+
+            float scaleFactor = CalculateScaleFactor(kg, go.name, go.GetComponent<FoodWeight>());
+
+            bool isInspectionInstance = !go.name.Contains("(Clone)");
+
+            if (_recentlyCaught.Contains(key) && isInspectionInstance)
+            {
+                // fresh catch - relative scale
+                tr.localScale *= scaleFactor;
+
+                DebugUtil.DebugLog(
+                    $"{go.name} inspection-relative scaleFactor={scaleFactor:F2} kg={kg:F2} {sourceTag}"
+                );
+
+                // cleanup
+                _recentlyCaught.Remove(key);
+                _freshCatchScaledOnce.Remove(key);
+
+                yield break;
+            }
 
             tr.localScale = baseScale * scaleFactor;
 
             DebugUtil.DebugLog(
-                $"[ScaledFishMod] {go.name} scaled by {scaleFactor:F2}x (≈{kg:F2} kg) {sourceTag}"
+                $"{go.name} final scaleFactor={scaleFactor:F2} kg={kg:F2} {sourceTag}"
             );
         }
 
         // ---------------- SCALE LOGIC ----------------
 
-        private static float CalculateScaleFactor(
-            float kg,
-            string name,
-            FoodWeight fw)
+        private static float CalculateScaleFactor(float kg, string name, FoodWeight fw)
         {
             float minW = 0.5f;
             float maxW = 7.0f;
@@ -171,6 +260,7 @@ namespace ScaledFishMod
                    name.Contains("smallmouthbass");
         }
     }
+
     internal static class DebugUtil
     {
         internal static void DebugLog(string msg)
