@@ -176,7 +176,7 @@ namespace ScaledFishMod
             string lname = go.name.ToLowerInvariant();
             Vector3 baseScale = default;
 
-            foreach (var kvp in _baseScales)
+            foreach (KeyValuePair<string, Vector3> kvp in _baseScales)
             {
                 if (lname.Contains(kvp.Key))
                 {
