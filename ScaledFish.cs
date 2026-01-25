@@ -31,7 +31,6 @@ namespace ScaledFishMod
     }
 
     // ---------------- PATCHES ----------------
-
     [HarmonyPatch(typeof(GearItem), nameof(GearItem.Awake))]
     internal static class GearItem_Awake_Patch
     {
@@ -39,7 +38,6 @@ namespace ScaledFishMod
         {
             if (__instance == null || __instance.m_InPlayerInventory)
                 return;
-
 
             MelonCoroutines.Start(
                 FishScaler.ScaleAfterSceneLoad(__instance)
@@ -61,49 +59,38 @@ namespace ScaledFishMod
         }
     }
 
-    [HarmonyPatch(typeof(IceFishingHole), "InstantiateFish")]
-    internal static class IceFishingHole_InstantiateFish_Patch
-    {
-        static void Postfix(GearItem __result)
-        {
-            if (__result == null || !__result)
-                return;
-
-            Transform tr = __result.transform;
-            if (tr == null)
-                return;
-
-            FishScaler.MarkAsRecentlyCaught(tr.Pointer);
-        }
-    }
-
     // ---------------- SCALER ----------------
-
     internal static class FishScaler
     {
-        private static readonly HashSet<IntPtr> _freshCatchScaledOnce = new HashSet<IntPtr>();
-        private static readonly HashSet<IntPtr> _recentlyCaught = new HashSet<IntPtr>();
-
+        // -------- BASE VISUAL SCALE --------
         private static readonly Dictionary<string, Vector3> _baseScales =
             new Dictionary<string, Vector3>()
         {
-            { "whitefish", new Vector3(0.35f, 0.35f, 0.35f) },
-            { "burbot", new Vector3(1.00f, 1.00f, 1.00f) },
-            { "rainbowtrout", new Vector3(0.35f, 0.35f, 0.35f) },
-            { "cohosalmon", new Vector3(0.35f, 0.35f, 0.35f) },
-            { "goldeye", new Vector3(1.00f, 1.00f, 1.00f) },
-            { "redirishlord", new Vector3(1.00f, 1.00f, 1.00f) },
-            { "rockfish", new Vector3(1.00f, 1.00f, 1.00f) },
-            { "smallmouthbass", new Vector3(0.60f, 0.60f, 0.60f) }
+            { "whitefish",       new Vector3(0.35f, 0.35f, 0.35f) },
+            { "burbot",          new Vector3(1.00f, 1.00f, 1.00f) },
+            { "rainbowtrout",    new Vector3(0.35f, 0.35f, 0.35f) },
+            { "cohosalmon",      new Vector3(0.35f, 0.35f, 0.35f) },
+            { "goldeye",         new Vector3(1.00f, 1.00f, 1.00f) },
+            { "redirishlord",    new Vector3(1.00f, 1.00f, 1.00f) },
+            { "rockfish",        new Vector3(1.00f, 1.00f, 1.00f) },
+            { "smallmouthbass",  new Vector3(0.60f, 0.60f, 0.60f) }
         };
 
-        public static void MarkAsRecentlyCaught(IntPtr key)
+        // -------- MANUAL WEIGHT RANGES --------
+        private static readonly Dictionary<string, (float minW, float maxW)> _weightRanges =
+            new Dictionary<string, (float, float)>()
         {
-            _recentlyCaught.Add(key);
-        }
+            { "whitefish",      (1.0f, 2.9f) },
+            { "burbot",         (4.0f, 7.3f) },
+            { "rainbowtrout",   (0.5f, 2.5f) },
+            { "cohosalmon",     (2.6f, 6.5f) },
+            { "goldeye",        (1.0f, 2.5f) },
+            { "redirishlord",   (1.6f, 3.5f) },
+            { "rockfish",       (1.5f, 4.5f) },
+            { "smallmouthbass", (2.0f, 5.5f) }
+        };
 
-        // ---------------- SCALING COROUTINES ----------------
-
+        // ---------------- COROUTINES ----------------
         public static IEnumerator ScaleAfterSceneLoad(GearItem gi)
         {
             yield return null;
@@ -115,46 +102,29 @@ namespace ScaledFishMod
 
         public static IEnumerator ScaleAfterDropDelayed(GearItem gi)
         {
-            if (gi == null || !gi || gi.gameObject == null)
-                yield break;
-
-            Transform tr = gi.transform;
-            if (tr == null)
+            if (gi == null || !gi)
                 yield break;
 
             int safetyCounter = 0;
             while (gi.m_InPlayerInventory)
             {
                 yield return null;
-                safetyCounter++;
-                if (safetyCounter > 30)
+                if (++safetyCounter > 30)
                     yield break;
             }
 
             yield return ScaleNow(gi, "[DropDelayed]");
         }
 
+        // ---------------- CORE ----------------
         public static IEnumerator ScaleNow(GearItem gi, string sourceTag)
         {
-            if (gi == null || !gi || gi.gameObject == null)
-                yield break;
-
-            if (gi.m_InPlayerInventory)
+            if (gi == null || !gi || gi.m_InPlayerInventory)
                 yield break;
 
             Transform tr = gi.transform;
             if (tr == null)
                 yield break;
-
-            IntPtr key = tr.Pointer;
-
-            if (_recentlyCaught.Contains(key))
-            {
-                if (_freshCatchScaledOnce.Contains(key))
-                    yield break;
-
-                _freshCatchScaledOnce.Add(key);
-            }
 
             GameObject go = gi.gameObject;
             if (!IsFish(go.name))
@@ -173,78 +143,51 @@ namespace ScaledFishMod
             if (kg <= 0.01f)
                 yield break;
 
-            string lname = go.name.ToLowerInvariant();
-            Vector3 baseScale = default;
+            float scaleFactor = CalculateScaleFactor(kg, go.name);
 
-            foreach (KeyValuePair<string, Vector3> kvp in _baseScales)
-            {
-                if (lname.Contains(kvp.Key))
-                {
-                    baseScale = kvp.Value;
-                    break;
-                }
-            }
-
-            if (baseScale == default)
-                yield break;
-
-            float scaleFactor = CalculateScaleFactor(kg, go.name, go.GetComponent<FoodWeight>());
-
-            bool isInspectionInstance = !go.name.Contains("(Clone)");
-
-            if (_recentlyCaught.Contains(key) && isInspectionInstance)
-            {
-                // fresh catch - relative scale
-                tr.localScale *= scaleFactor;
-
-                DebugUtil.DebugLog(
-                    $"{go.name} inspection-relative scaleFactor={scaleFactor:F2} kg={kg:F2} {sourceTag}"
-                );
-
-                // cleanup
-                _recentlyCaught.Remove(key);
-                _freshCatchScaledOnce.Remove(key);
-
-                yield break;
-            }
-
-            tr.localScale = baseScale * scaleFactor;
+            tr.localScale *= scaleFactor;
 
             DebugUtil.DebugLog(
-                $"{go.name} final scaleFactor={scaleFactor:F2} kg={kg:F2} {sourceTag}"
+                $"{go.name} scaleFactor={scaleFactor:F2} kg={kg:F2} {sourceTag}"
             );
         }
 
         // ---------------- SCALE LOGIC ----------------
-
-        private static float CalculateScaleFactor(float kg, string name, FoodWeight fw)
+        private static float CalculateScaleFactor(float kg, string name)
         {
-            float minW = 0.5f;
-            float maxW = 7.0f;
-
-            if (fw != null)
-            {
-                minW = fw.m_MinWeight.ToQuantity(1f);
-                maxW = fw.m_MaxWeight.ToQuantity(1f);
-            }
+            string lname = name.ToLowerInvariant();
 
             float minScale = 0.8f;
             float maxScale = 1.4f;
 
-            string lname = name.ToLowerInvariant();
-            if (lname.Contains("whitefish")) { minScale = 0.8f; maxScale = 1.16f; }
-            else if (lname.Contains("burbot")) { minScale = 1.0f; maxScale = 1.72f; }
+            if (lname.Contains("whitefish")) { minScale = 0.8f; maxScale = 1.18f; }
+            else if (lname.Contains("burbot")) { minScale = 1.1f; maxScale = 1.72f; }
             else if (lname.Contains("rainbowtrout")) { minScale = 0.52f; maxScale = 0.88f; }
             else if (lname.Contains("cohosalmon")) { minScale = 0.87f; maxScale = 1.28f; }
             else if (lname.Contains("goldeye")) { minScale = 0.73f; maxScale = 1.42f; }
             else if (lname.Contains("redirishlord")) { minScale = 0.95f; maxScale = 1.25f; }
             else if (lname.Contains("rockfish")) { minScale = 0.9f; maxScale = 1.45f; }
 
+            float minW = 0.5f;
+            float maxW = 7.0f;
+
+            foreach (KeyValuePair<string, (float minW, float maxW)> kvp in _weightRanges)
+            {
+                if (lname.Contains(kvp.Key))
+                {
+                    minW = kvp.Value.minW;
+                    maxW = kvp.Value.maxW;
+                    break;
+                }
+            }
+
             float t = Mathf.InverseLerp(minW, maxW, kg);
+            t = Mathf.Clamp01(t);
+
             return Mathf.Lerp(minScale, maxScale, t);
         }
 
-        private static bool IsFish(string name)
+        public static bool IsFish(string name)
         {
             if (string.IsNullOrEmpty(name))
                 return false;
